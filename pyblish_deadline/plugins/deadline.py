@@ -19,8 +19,8 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
     def process(self, context):
 
         self.orders = []
-        jobs_instances_by_order = defaultdict(list)
-        jobs_instances_no_order = []
+        jobs_entities_by_order = defaultdict(list)
+        jobs_entities_no_order = []
 
         for instance in context:
 
@@ -43,50 +43,71 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
                 if "order" in job:
                     order = job["order"]
                     self.orders.append(order)
-                    jobs_instances_by_order[order].append((job, instance))
+                    jobs_entities_by_order[order].append((job, instance))
                 else:
-                    jobs_instances_no_order.append((job, instance))
+                    jobs_entities_no_order.append((job, instance))
+
+        if "deadlineData" in context.data:
+            jobs = context.data("deadlineData")
+            if not isinstance(jobs, list):
+                jobs = [jobs]
+
+            for job in jobs:
+                if "order" in job:
+                    order = job["order"]
+                    self.orders.append(order)
+                    jobs_entities_by_order[order].append((job, context))
+                else:
+                    jobs_entities_no_order.append((job, context))
 
         self.orders = list(set(self.orders))
         self.orders.sort()
 
-        jobs_instances_sorted = []
+        jobs_entities_sorted = []
         for order in self.orders:
-            for job_instance in jobs_instances_by_order[order]:
-                jobs_instances_sorted.append(job_instance)
+            for job_instance in jobs_entities_by_order[order]:
+                jobs_entities_sorted.append(job_instance)
 
-        jobs_instances_sorted.extend(jobs_instances_no_order)
+        jobs_entities_sorted.extend(jobs_entities_no_order)
 
         self.job_ids = [[] for i in self.orders]
-        for job, instance in jobs_instances_sorted:
+        for job, instance in jobs_entities_sorted:
             self._process_job(job, instance)
 
-    def _process_job(self, job, instance):
+    def _process_job(self, job, entity):
             submission_id = uuid.uuid4()
 
             # getting job data
             job_data = job["job"]
 
-            # setting instance data
-            data = {}
-            for key in instance.data:
-                try:
-                    json.dumps(instance.data[key])
-                    data[key] = instance.data[key]
-                except:
-                    msg = "\"{0}\"".format(instance.data[key])
-                    msg += " in instance.data[\"{0}\"]".format(key)
-                    msg += " could not be serialized."
-                    self.log.warning(msg)
-            data = json.dumps(data)
+            if isinstance(entity, pyblish.api.Context):
+                context = entity
+            elif isinstance(entity, pyblish.api.Instance):
+                instance = entity
+                context = instance.context
+                # setting instance data
+                data = {}
+                for key in instance.data:
+                    try:
+                        json.dumps(instance.data[key])
+                        data[key] = instance.data[key]
+                    except:
+                        msg = "\"{0}\"".format(instance.data[key])
+                        msg += " in instance.data[\"{0}\"]".format(key)
+                        msg += " could not be serialized."
+                        self.log.warning(msg)
+                data = json.dumps(data)
 
-            if "ExtraInfoKeyValue" in job_data:
-                job_data["ExtraInfoKeyValue"]["PyblishInstanceData"] = data
+                if "ExtraInfoKeyValue" in job_data:
+                    job_data["ExtraInfoKeyValue"]["PyblishInstanceData"] = data
+                else:
+                    job_data["ExtraInfoKeyValue"] = {"PyblishInstanceData": data}
             else:
-                job_data["ExtraInfoKeyValue"] = {"PyblishInstanceData": data}
+                self.log.warning("Unsupported type: ", type(entity))
+                return
 
             # setting context data
-            context_data = instance.context.data.copy()
+            context_data = context.data.copy()
             del context_data["results"]
             if "deadlineJob" in context_data:
                 del context_data["deadlineJob"]
@@ -103,7 +124,10 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
                     self.log.warning(msg)
             data = json.dumps(data)
 
-            job_data["ExtraInfoKeyValue"]["PyblishContextData"] = data
+            if "ExtraInfoKeyValue" in job_data:
+                job_data["ExtraInfoKeyValue"]["PyblishContextData"] = data
+            else:
+                job_data["ExtraInfoKeyValue"] = {"PyblishContextData": data}
 
             # setting up dependencies
             if "order" in job:
@@ -173,7 +197,7 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
             # submitting job
             args = [job_path, plugin_path]
 
-            if "auxiliaryFiles" in instance.data["deadlineData"]:
+            if "auxiliaryFiles" in entity.data["deadlineData"]:
                 aux_files = job["auxiliaryFiles"]
                 if isinstance(aux_files, list):
                     args.extend(aux_files)
