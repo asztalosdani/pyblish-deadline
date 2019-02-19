@@ -5,6 +5,7 @@ import traceback
 import re
 import uuid
 import json
+from collections import defaultdict
 
 import pyblish.api
 
@@ -17,9 +18,9 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
 
     def process(self, context):
 
-        instances = {}
-        instances_order = []
-        instances_no_order = []
+        self.orders = []
+        jobs_instances_by_order = defaultdict(list)
+        jobs_instances_no_order = []
 
         for instance in context:
 
@@ -33,33 +34,38 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
                 self.log.info(msg)
                 continue
 
-            if "order" in instance.data("deadlineData"):
-                order = instance.data("deadlineData")["order"]
-                instances_order.append(order)
-                if order in instances:
-                    instances[order].append(instance)
+            jobs = instance.data("deadlineData")
+            # maintain backward compatibility, where only job could be submitted per instance
+            if not isinstance(jobs, list):
+                jobs = [jobs]
+
+            for job in jobs:
+                if "order" in job:
+                    order = job["order"]
+                    self.orders.append(order)
+                    jobs_instances_by_order[order].append((job, instance))
                 else:
-                    instances[order] = [instance]
-            else:
-                instances_no_order.append(instance)
+                    jobs_instances_no_order.append((job, instance))
 
-        instances_order = list(set(instances_order))
-        instances_order.sort()
+        self.orders = list(set(self.orders))
+        self.orders.sort()
 
-        new_context = []
-        for order in instances_order:
-            for instance in instances[order]:
-                new_context.append(instance)
+        jobs_instances_sorted = []
+        for order in self.orders:
+            for job_instance in jobs_instances_by_order[order]:
+                jobs_instances_sorted.append(job_instance)
 
-        if not instances_order:
-            new_context = instances_no_order
+        jobs_instances_sorted.extend(jobs_instances_no_order)
 
-        for instance in new_context:
+        self.job_ids = [[] for i in self.orders]
+        for job, instance in jobs_instances_sorted:
+            self._process_job(job, instance)
 
+    def _process_job(self, job, instance):
             submission_id = uuid.uuid4()
 
             # getting job data
-            job_data = instance.data("deadlineData")["job"]
+            job_data = job["job"]
 
             # setting instance data
             data = {}
@@ -100,14 +106,15 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
             job_data["ExtraInfoKeyValue"]["PyblishContextData"] = data
 
             # setting up dependencies
-            if "order" in instance.data("deadlineData"):
-                order = instance.data("deadlineData")["order"]
-                if instances_order.index(order) != 0:
-                    index = instances_order.index(order) - 1
-                    dependencies = instances[instances_order[index]]
-                    for count in range(0, len(dependencies)):
-                        name = "JobDependency%s" % count
-                        job_data[name] = dependencies[count].data("jobId")
+            if "order" in job:
+                order = job["order"]
+                current_order_index = self.orders.index(order)
+                if current_order_index != 0:
+                    index = current_order_index - 1
+                    dependencies = self.job_ids[index]
+                    for i, job_id in enumerate(dependencies):
+                        name = "JobDependency%s" % i
+                        job_data[name] = job_id
 
             # writing job data
             data = ""
@@ -149,7 +156,7 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
             self.log.info("job data:\n\n%s" % data)
 
             # writing plugin data
-            plugin_data = instance.data("deadlineData")["plugin"]
+            plugin_data = job["plugin"]
             data = ""
             for entry in plugin_data:
                 data += "%s=%s\n" % (entry, plugin_data[entry])
@@ -167,7 +174,7 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
             args = [job_path, plugin_path]
 
             if "auxiliaryFiles" in instance.data["deadlineData"]:
-                aux_files = instance.data("deadlineData")["auxiliaryFiles"]
+                aux_files = job["auxiliaryFiles"]
                 if isinstance(aux_files, list):
                     args.extend(aux_files)
                 else:
@@ -180,7 +187,11 @@ class IntegrateDeadline(pyblish.api.ContextPlugin):
                 self.log.info(result)
 
                 job_id = re.search(r"JobID=(.*)", result).groups()[0]
-                instance.set_data("jobId", value=job_id)
+
+                if "order" in job:
+                    order = job["order"]
+                    index = self.orders.index(order)
+                    self.job_ids[index].append(job_id)
             except:
                 raise ValueError(traceback.format_exc())
 
